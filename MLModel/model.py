@@ -15,12 +15,14 @@ import torch.nn.functional as F
 import torch.optim as optim
 import torch.utils.data
 import torch.utils.data.distributed
-from torchvision import datasets, transforms
+from torchvision import datasets, transforms, models
 
 from PIL import Image
 
 import zipfile
 from torch.utils.data import DataLoader
+
+from collections import OrderedDict
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -138,28 +140,6 @@ def _get_data_loaders(batch_sizeP, training_dir, is_distributed, **kwargs):
     print("_get_train_data_loader")
     print("-------------------------")
     
-    
-#     dataset = datasets.MNIST(
-#         training_dir,
-#         train=True,
-#         transform=transforms.Compose(
-#             [transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))]
-#         ),
-#         download=False,
-#     )
-#     train_sampler = (
-#         torch.utils.data.distributed.DistributedSampler(dataset) if is_distributed else None
-#     )
-#     return torch.utils.data.DataLoader(
-#         dataset,
-#         batch_size=batch_size,
-#         shuffle=train_sampler is None,
-#         sampler=train_sampler,
-#         **kwargs
-#     )
-
-    
-    
     load_dataset()
     train_dataset = datasets.ImageFolder("./final_dataset/train/", transform=img_transform['dataset'])
     
@@ -182,27 +162,6 @@ def _get_data_loaders(batch_sizeP, training_dir, is_distributed, **kwargs):
     print("val_setB", val_setB)
     return train_setB, val_setB
     
-    
-
-# def _get_test_data_loader(test_batch_size, training_dir, **kwargs):
-#     logger.info("Get test data loader")
-    
-#     print("-------------------------")
-#     print("_get_test_data_loader")
-#     print("-------------------------")
-    
-    
-#     load_dataset()
-#     test_dataset = datasets.ImageFolder("./final_dataset/GT/", transform=img_transform['dataset'])
-    
-#     print("------------------------------------")
-#     print('#{} test images loaded succesfully!'.format(len(test_dataset)))
-    
-#     test_setB = DataLoader(test_dataset, batch_size= 32, shuffle=False)
-#     print("------------------------------")
-#     print("test_setB", test_setB)
-#     return test_setB
-
 
 def _average_gradients(model):
     # Gradient averaging.
@@ -249,39 +208,22 @@ def train(args, tracker=None):
     if use_cuda:
         torch.cuda.manual_seed(args.seed)
 
-#     train_loader = _get_train_data_loader(args.batch_size, args.data_dir, is_distributed, **kwargs)
-#     test_loader = _get_test_data_loader(args.test_batch_size, args.data_dir, **kwargs)
-
     train_loader, val_loader = _get_data_loaders(args.batch_size, args.data_dir, is_distributed, **kwargs)
+    
+    model = models.resnet50(pretrained=True)
 
-#     logger.info(
-#         "Processes {}/{} ({:.0f}%) of train data".format(
-#             len(train_loader.sampler),
-#             len(train_loader.dataset),
-#             100.0 * len(train_loader.sampler) / len(train_loader.dataset),
-#         )
-#     )
 
-#     logger.info(
-#         "Processes {}/{} ({:.0f}%) of test data".format(
-#             len(test_loader.sampler),
-#             len(test_loader.dataset),
-#             100.0 * len(test_loader.sampler) / len(test_loader.dataset),
-#         )
-#     )
+# Build custom classifier
+    classifier = nn.Sequential(OrderedDict([('fc1', nn.Linear(25088, 5000)),
+                                            ('relu', nn.ReLU()),
+                                            ('drop', nn.Dropout(p=0.5)),
+                                            ('fc2', nn.Linear(5000, 5)),
+                                            ('output', nn.LogSoftmax(dim=1))]))
 
-    model = Net().to(device)
-    if is_distributed and use_cuda:
-        # multi-machine multi-gpu case
-        model = torch.nn.parallel.DistributedDataParallel(model)
-    else:
-        # single-machine multi-gpu case or single-machine or multi-machine cpu case
-        model = torch.nn.DataParallel(model)
+    model.classifier = classifier
 
-    if args.optimizer == "sgd":
-        optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum)
-    else:
-        optimizer = optim.Adam(model.parameters(), lr=args.lr)
+    optimizer = optim.Adam(model.parameters(), lr=args.lr)
+    criterion = nn.CrossEntropyLoss()
     
     print("-------------------------------")
     print("loop")
@@ -300,14 +242,15 @@ def train(args, tracker=None):
                 print("it = ", it, "of ", len(train_loader))
                 it += 1
                 data, target = data.to(device), target.to(device)
-                optimizer.zero_grad()
+                
                 print("---------------------")
                 print("data.shape", data.shape)
-                output = model(data)
-                output = output
+                output = model.forward(data)
                 print("output.shape", output.shape)
                 print("target.shape", target.shape)
-                loss = F.nll_loss(output, target)
+                loss = criterion(output, target)
+                print("loss", loss)
+                optimizer.zero_grad()
                 loss.backward()
                 if is_distributed and not use_cuda:
                     # average gradients manually for multi-machine cpu case only
@@ -341,7 +284,7 @@ def evaluate(model, val_loader, device, tracker=None):
     print("evaluate")
     print("-------------------------")
     
-    
+    criterion = nn.CrossEntropyLoss()
     model.eval()
     test_loss = 0
     correct = 0
@@ -351,7 +294,7 @@ def evaluate(model, val_loader, device, tracker=None):
                 print("data.shape.val", data.shape)
                 data, target = data.to(device), target.to(device)
                 output = model(data)
-                test_loss += F.nll_loss(output, target, size_average=False).item()  # sum up batch loss
+                test_loss += criterion(output, target)  # sum up batch loss
                 pred = output.max(1, keepdim=True)[1]  # get the index of the max log-probability
                 correct += pred.eq(target.view_as(pred)).sum().item()
 
@@ -393,25 +336,6 @@ def save_model(model, model_dir):
     # recommended way from http://pytorch.org/docs/master/notes/serialization.html
     torch.save(model.cpu().state_dict(), path)
     
-#     cwd = os.getcwd()
-#     print("----------------------------")
-#     print("current dir: ", cwd)
-
-#     s3_client = boto3.client("s3")
-#     prefix = "hackathon"
-        
-#     print("-------------------------")
-#     bucket = "sagemaker-hackathon-demo-eu-west-1-017233837209"
-    
-#     #client.put_object(Body=more_binary_data, Bucket='my_bucket_name', Key='my/key/including/anotherfilename.txt')
-    
-#     inputs = s3_client.put_object(, bucket, "model.pth")
-    
-#     s3 = session.resource('s3')
-
-#     result = s3.Bucket(bucket).upload_file(os.path.join(model_dir, "model.pth"),'hackathon/model.pth')
-#     print("inputs_model_saved", inputs)
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
