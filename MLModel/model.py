@@ -101,7 +101,7 @@ def check_dataset_loaded():
     found = False
     cwd = os.getcwd()
     for root, dirr, files in os.walk(cwd):
-        if "dataset_reduced.zip" in files:
+        if "dataset.zip" in files:
             found = True
             break
             
@@ -120,12 +120,12 @@ def load_dataset():
         bucket = "sagemaker-hackathon-demo-eu-west-1-017233837209"
         s3_client.download_file(
         bucket,
-        "hackathon/dataset_reduced.zip",
-        "dataset_reduced.zip",
+        "hackathon/dataset.zip",
+        "dataset.zip",
         )
         
         
-        with zipfile.ZipFile("./dataset_reduced.zip", 'r') as zip_ref:
+        with zipfile.ZipFile("./dataset.zip", 'r') as zip_ref:
             zip_ref.extractall("./")
         
         print("-------------------------")
