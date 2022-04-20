@@ -3,11 +3,8 @@ import json
 import logging
 import os
 import sys
-import time
-from os.path import join
 
-import boto3
-import sagemaker_containers
+#import sagemaker_containers
 import torch
 import torch.distributed as dist
 import torch.nn as nn
@@ -15,19 +12,15 @@ import torch.nn.functional as F
 import torch.optim as optim
 import torch.utils.data
 import torch.utils.data.distributed
-from torchvision import datasets, transforms, models
+from torchvision import datasets, transforms
 
-from PIL import Image
-
+import boto3
 import zipfile
 from torch.utils.data import DataLoader
-
-from collections import OrderedDict
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 logger.addHandler(logging.StreamHandler(sys.stdout))
-
 
 img_transform= {
     'dataset':
@@ -51,19 +44,6 @@ img_transform= {
     ]),
 }
 
-
-if "SAGEMAKER_METRICS_DIRECTORY" in os.environ:
-    log_file_handler = logging.FileHandler(
-        join(os.environ["SAGEMAKER_METRICS_DIRECTORY"], "metrics.json")
-    )
-    formatter = logging.Formatter(
-        "{'time':'%(asctime)s', 'name': '%(name)s', \
-    'level': '%(levelname)s', 'message': '%(message)s'}",
-        style="%",
-    )
-    log_file_handler.setFormatter(formatter)
-    logger.addHandler(log_file_handler)
-
 # Based on https://github.com/pytorch/examples/blob/master/mnist/main.py
 class Net(nn.Module):
     def __init__(self):
@@ -73,25 +53,19 @@ class Net(nn.Module):
         self.conv2_drop = nn.Dropout2d()
         self.fc1 = nn.Linear(320, 50)
         self.fc2 = nn.Linear(50, 5)
-        
+
     def forward(self, x):
         x = F.relu(F.max_pool2d(self.conv1(x), 2))
-        print("x1", x.shape)
         x = F.relu(F.max_pool2d(self.conv2_drop(self.conv2(x)), 2))
-        print("x2", x.shape)
-        x = x.view(64, -1)
-        print("x3", x.shape)
+        x = x.view(-1, 320)
         x = F.relu(self.fc1(x))
-        print("x4", x.shape)
         x = F.dropout(x, training=self.training)
-        print("x5", x.shape)
         x = self.fc2(x)
-        print("x6", x.shape)
         return F.log_softmax(x, dim=1)
 
+
     
-    
-    
+
 def check_dataset_loaded():
     print("-------------------------")
     print("check_dataset_loaded")
@@ -131,10 +105,8 @@ def load_dataset():
         print("-------------------------")
         print("after zip")
     
-    
-    
-def _get_data_loaders(batch_sizeP, training_dir, is_distributed, **kwargs):
-    logger.info("Get train data loader")
+def _get_train_data_loader(batch_size, training_dir, is_distributed, **kwargs):
+#     logger.info("Get train data loader")
     
     print("-------------------------")
     print("_get_train_data_loader")
@@ -142,46 +114,90 @@ def _get_data_loaders(batch_sizeP, training_dir, is_distributed, **kwargs):
     
     load_dataset()
     train_dataset = datasets.ImageFolder("./final_dataset/train/", transform=img_transform['dataset'])
+    train_sampler = (
+        torch.utils.data.distributed.DistributedSampler(train_dataset) if is_distributed else None
+    )
     
-    print("------------------------------------")
-    print('#{} train images loaded succesfully!'.format(len(train_dataset)))
-    
-    SPLIT_SIZE = .1
-    n_val = round(SPLIT_SIZE * len(train_dataset))
+    return torch.utils.data.DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=train_sampler is None,
+        sampler=train_sampler,
+        **kwargs)
 
-    train_set, val_set = torch.utils.data.random_split(train_dataset, [len(train_dataset)-n_val, n_val])
 
-    print('Spliting train images to #{} training samples and #{} samples for validation'.format(len(train_set), len(val_set)))
+# def _get_train_data_loader(batch_size, training_dir, is_distributed, **kwargs):
+#     logger.info("Get train data loader")
+#     dataset = datasets.MNIST(
+#         training_dir,
+#         train=True,
+#         transform=transforms.Compose(
+#             [transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))]
+#         ),
+#     )
     
-    print("batch_sizeP", batch_sizeP)
-    train_setB = DataLoader(train_set, batch_size= batch_sizeP, shuffle=False)
-    val_setB = DataLoader(val_set, batch_size= batch_sizeP, shuffle=False)
+#     print("TYPE DATASET MNIST --------------")
+#     print(type(dataset))
+#     train_sampler = (
+#         torch.utils.data.distributed.DistributedSampler(dataset) if is_distributed else None
+#     )
+#     return torch.utils.data.DataLoader(
+#         dataset,
+#         batch_size=batch_size,
+#         shuffle=train_sampler is None,
+#         sampler=train_sampler,
+#         **kwargs
+#     )
+
+
+
+def _get_test_data_loader(batch_size, training_dir, **kwargs):
+    logger.info("Get test data loader")
     
-    print("------------------------------")
-    print("train_setB", train_setB)
-    print("val_setB", val_setB)
-    return train_setB, val_setB
+    print("-------------------------")
+    print("_get_test_data_loader")
+    print("-------------------------")
     
+    load_dataset()
+    test_dataset = datasets.ImageFolder("./final_dataset/GT/", transform=img_transform['dataset'])
+    
+    return torch.utils.data.DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        **kwargs)
+
+
+
+
+
+
+
+# def _get_test_data_loader(test_batch_size, training_dir, **kwargs):
+#     logger.info("Get test data loader")
+#     return torch.utils.data.DataLoader(
+#         datasets.MNIST(
+#             training_dir,
+#             train=False,
+#             transform=transforms.Compose(
+#                 [transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))]
+#             ),
+#         ),
+#         batch_size=test_batch_size,
+#         shuffle=True,
+#         **kwargs
+#     )
+
 
 def _average_gradients(model):
     # Gradient averaging.
-    
-    print("-------------------------")
-    print("_average_gradients")
-    print("-------------------------")
-    
-    
     size = float(dist.get_world_size())
     for param in model.parameters():
         dist.all_reduce(param.grad.data, op=dist.reduce_op.SUM)
         param.grad.data /= size
 
 
-def train(args, tracker=None):
-    print("-------------------------")
-    print("train")
-    print("-------------------------")
-    
+def train(args):
     is_distributed = len(args.hosts) > 1 and args.backend is not None
     logger.debug("Distributed training - {}".format(is_distributed))
     use_cuda = args.num_gpus > 0
@@ -208,141 +224,92 @@ def train(args, tracker=None):
     if use_cuda:
         torch.cuda.manual_seed(args.seed)
 
-    train_loader, val_loader = _get_data_loaders(args.batch_size, args.data_dir, is_distributed, **kwargs)
-    
-    model = models.resnet50(pretrained=True)
+    train_loader = _get_train_data_loader(args.batch_size, args.data_dir, is_distributed, **kwargs)
+    print("********* PASO TRAIN ****************!!!!!!! ")
+    test_loader = _get_test_data_loader(args.test_batch_size, args.data_dir, **kwargs)
+    print("********* PASO TEST ****************!!!!!!! ")
 
+    logger.debug(
+        "Processes {}/{} ({:.0f}%) of train data".format(
+            len(train_loader.sampler),
+            len(train_loader.dataset),
+            100.0 * len(train_loader.sampler) / len(train_loader.dataset),
+        )
+    )
 
-# Build custom classifier
-    classifier = nn.Sequential(OrderedDict([('fc1', nn.Linear(25088, 5000)),
-                                            ('relu', nn.ReLU()),
-                                            ('drop', nn.Dropout(p=0.5)),
-                                            ('fc2', nn.Linear(5000, 5)),
-                                            ('output', nn.LogSoftmax(dim=1))]))
+    logger.debug(
+        "Processes {}/{} ({:.0f}%) of test data".format(
+            len(test_loader.sampler),
+            len(test_loader.dataset),
+            100.0 * len(test_loader.sampler) / len(test_loader.dataset),
+        )
+    )
 
-    model.classifier = classifier
+    model = Net().to(device)
+    if is_distributed and use_cuda:
+        # multi-machine multi-gpu case
+        model = torch.nn.parallel.DistributedDataParallel(model)
+    else:
+        # single-machine multi-gpu case or single-machine or multi-machine cpu case
+        model = torch.nn.DataParallel(model)
 
-    optimizer = optim.Adam(model.parameters(), lr=args.lr)
-    criterion = nn.CrossEntropyLoss()
-    
-    print("-------------------------------")
-    print("loop")
-    args.epochs = 1
+    optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum)
+
     for epoch in range(1, args.epochs + 1):
-        print("---------------------")
-        print("EPOCH = ", epoch)
-        print("train data_loader size = ", len(train_loader))
-        it = 0
-        
-        
         model.train()
         for batch_idx, (data, target) in enumerate(train_loader, 1):
-            if data.shape[0] == args.batch_size:
-                print("----------------------------")
-                print("it = ", it, "of ", len(train_loader))
-                it += 1
-                data, target = data.to(device), target.to(device)
-                
-                print("---------------------")
-                print("data.shape", data.shape)
-                output = model.forward(data)
-                print("output.shape", output.shape)
-                print("target.shape", target.shape)
-                loss = criterion(output, target)
-                print("loss", loss)
-                optimizer.zero_grad()
-                loss.backward()
-                if is_distributed and not use_cuda:
-                    # average gradients manually for multi-machine cpu case only
-                    _average_gradients(model)
-                optimizer.step()
-                if batch_idx % args.log_interval == 0:
-                    logger.info(
-                        "Train Epoch: {} [{}/{} ({:.0f}%)], Train Loss: {:.6f};".format(
-                            epoch,
-                            batch_idx * len(data),
-                            len(train_loader.sampler),
-                            100.0 * batch_idx / len(train_loader),
-                            loss.item(),
-                        )
-                    )
-                    
-            print("Train Epoch: {} [{}/{} ({:.0f}%)], Train Loss: {:.6f};".format(
-                epoch,
-                batch_idx * len(data),
-                len(train_loader.sampler),
-                100.0 * batch_idx / len(train_loader),
-                loss.item(),))
-            
-            evaluate(model, val_loader, device, tracker)
-        save_model(model, args.model_dir)
+            data, target = data.to(device), target.to(device)
+            optimizer.zero_grad()
+            output = model(data)
+            loss = F.nll_loss(output, target)
+            loss.backward()
+            if is_distributed and not use_cuda:
+                # average gradients manually for multi-machine cpu case only
+                _average_gradients(model)
+            optimizer.step()
+#             if batch_idx % args.log_interval == 0:
+            logger.info("Train Epoch: {} [{}/{} ({:.0f}%)] Loss: {:.6f}".format(epoch,batch_idx * len(data),len(train_loader.sampler),100.0 * batch_idx / len(train_loader),loss.item(),))
+        test(model, test_loader, device)
+    save_model(model, args.model_dir)
 
 
-def evaluate(model, val_loader, device, tracker=None):
-    
-    print("-------------------------")
-    print("evaluate")
-    print("-------------------------")
-    
-    criterion = nn.CrossEntropyLoss()
+def test(model, test_loader, device):
     model.eval()
     test_loss = 0
     correct = 0
     with torch.no_grad():
-        for data, target in val_loader:
-            if data.shape[0] == args.batch_size:
-                print("data.shape.val", data.shape)
-                data, target = data.to(device), target.to(device)
-                output = model(data)
-                test_loss += criterion(output, target)  # sum up batch loss
-                pred = output.max(1, keepdim=True)[1]  # get the index of the max log-probability
-                correct += pred.eq(target.view_as(pred)).sum().item()
+        for data, target in test_loader:
+            data, target = data.to(device), target.to(device)
+            output = model(data)
+            test_loss += F.nll_loss(output, target, size_average=False).item()  # sum up batch loss
+            pred = output.max(1, keepdim=True)[1]  # get the index of the max log-probability
+            correct += pred.eq(target.view_as(pred)).sum().item()
 
-                test_loss /= len(val_loader.dataset)
-                print(
-                    "Test Average loss: {:.4f}, Test Accuracy: {:.0f}%;\n".format(
-                    test_loss, 100.0 * correct / len(val_loader.dataset)
-                )
-                )
+    test_loss /= len(test_loader.dataset)
+    logger.info(
+        "Test set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n".format(
+            test_loss, correct, len(test_loader.dataset), 100.0 * correct / len(test_loader.dataset)
+        )
+    )
 
 
 def model_fn(model_dir):
-    
-    print("-------------------------")
-    print("model_fn")
-    print("-------------------------")
-    
-    
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    hidden_channels = int(os.environ.get("hidden_channels", "5"))
-    kernel_size = int(os.environ.get("kernel_size", "5"))
-    dropout = float(os.environ.get("dropout", "0.5"))
-    model = torch.nn.DataParallel(Net(hidden_channels, kernel_size, dropout))
+    model = torch.nn.DataParallel(Net())
     with open(os.path.join(model_dir, "model.pth"), "rb") as f:
         model.load_state_dict(torch.load(f))
-        return model.to(device)
+    return model.to(device)
 
 
 def save_model(model, model_dir):
-    
-    print("-------------------------")
-    print("save_model")
-    print("-------------------------")
-    
-    
     logger.info("Saving the model.")
     path = os.path.join(model_dir, "model.pth")
     # recommended way from http://pytorch.org/docs/master/notes/serialization.html
     torch.save(model.cpu().state_dict(), path)
-    
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    
-    print("-------------------------")
-    print("__main")
-    print("-------------------------")
 
     # Data and model checkpoints directories
     parser.add_argument(
@@ -355,7 +322,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--test-batch-size",
         type=int,
-        default=64,
+        default=1000,
         metavar="N",
         help="input batch size for testing (default: 1000)",
     )
@@ -366,40 +333,11 @@ if __name__ == "__main__":
         metavar="N",
         help="number of epochs to train (default: 10)",
     )
-    parser.add_argument("--optimizer", type=str, default="sgd", help="optimizer for training.")
     parser.add_argument(
-        "--lr",
-        type=float,
-        default=0.01,
-        metavar="LR",
-        help="learning rate (default: 0.01)",
+        "--lr", type=float, default=0.01, metavar="LR", help="learning rate (default: 0.01)"
     )
     parser.add_argument(
-        "--dropout",
-        type=float,
-        default=0.5,
-        metavar="DROP",
-        help="dropout rate (default: 0.5)",
-    )
-    parser.add_argument(
-        "--kernel_size",
-        type=int,
-        default=5,
-        metavar="KERNEL",
-        help="conv2d filter kernel size (default: 5)",
-    )
-    parser.add_argument(
-        "--momentum",
-        type=float,
-        default=0.5,
-        metavar="M",
-        help="SGD momentum (default: 0.5)",
-    )
-    parser.add_argument(
-        "--hidden_channels",
-        type=int,
-        default=10,
-        help="number of channels in hidden conv layer",
+        "--momentum", type=float, default=0.5, metavar="M", help="SGD momentum (default: 0.5)"
     )
     parser.add_argument("--seed", type=int, default=1, metavar="S", help="random seed (default: 1)")
     parser.add_argument(
@@ -423,6 +361,4 @@ if __name__ == "__main__":
     parser.add_argument("--data-dir", type=str, default=os.environ["SM_CHANNEL_TRAINING"])
     parser.add_argument("--num-gpus", type=int, default=os.environ["SM_NUM_GPUS"])
 
-    args = parser.parse_args()
-
-    train(args)
+    train(parser.parse_args())
