@@ -18,6 +18,12 @@ import sys
 
 import torch
 
+import cv2
+import numpy as np
+
+import torch
+import torchvision
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 logger.addHandler(logging.StreamHandler(sys.stdout))
@@ -25,6 +31,27 @@ logger.addHandler(logging.StreamHandler(sys.stdout))
 # To use new EIA inference API, customer should use attach_eia(model, eia_ordinal_number)
 VERSIONS_USE_NEW_API = ["1.5.1"]
 
+def input_fn(input_data, content_type):
+    logger.info("INPUT_FN")
+    
+    decoded_image = cv2.imdecode(np.frombuffer(input_data, np.uint8), -1)
+    
+    logger.info("decoded shape")
+    logger.info(decoded_image.shape)
+    
+    img_resized = cv2.resize(decoded_image, (28, 28), interpolation=cv2.INTER_LINEAR)
+    img_resized = cv2.bitwise_not(img_resized)
+    logger.info("img_resized shape")
+    logger.info(img_resized.shape)
+    
+    convert = torchvision.transforms.ToTensor()
+    
+    x = convert(img_resized).unsqueeze(0)
+    
+    logger.info("x shape")
+    logger.info(x.shape)
+    return x
+    
 
 def predict_fn(input_data, model):
     logger.info(
@@ -51,6 +78,7 @@ def predict_fn(input_data, model):
 #         else:
 #             with torch.jit.optimized_execution(True, {"target_device": "eia:0"}):
 #                 return model(input_data)
+
 
 
 def model_fn(model_dir):
