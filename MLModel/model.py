@@ -257,19 +257,38 @@ def train(args):
 
     for epoch in range(1, args.epochs + 1):
         model.train()
+        train_loss = 0
+        correct = 0
+        running_accuracy = 0
+        processed_train = 0
         for batch_idx, (data, target) in enumerate(train_loader, 1):
             data, target = data.to(device), target.to(device)
+            
+            processed_train += len(data)
+            print("processed_train: ", processed_train)
+            print("Epoch", epoch, "percentage of training completed: ",  100 * float(processed_train / len(train_loader.dataset)))
+            
+            
             optimizer.zero_grad()
             output = model(data)
             loss = F.nll_loss(output, target)
             loss.backward()
+            
+            train_loss += F.nll_loss(output, target, size_average=False).item()  # sum up batch loss
+            pred = output.max(1, keepdim=True)[1]  # get the index of the max log-probability
+            correct += pred.eq(target.view_as(pred)).sum().item()
+            
             if is_distributed and not use_cuda:
                 # average gradients manually for multi-machine cpu case only
                 _average_gradients(model)
             optimizer.step()
 #             if batch_idx % args.log_interval == 0:
-            logger.info("Train Epoch: {} [{}/{} ({:.0f}%)] Loss: {:.6f}".format(epoch,batch_idx * len(data),len(train_loader.sampler),100.0 * batch_idx / len(train_loader),loss.item(),))
+            with torch.no_grad():
+              running_accuracy += (output.max(1)[1] == target).sum().item()
+    
+        print("Epoch ", epoch, "Training accuracy:", running_accuracy/float(len(train_loader.dataset)))
         test(model, test_loader, device)
+            
     save_model(model, args.model_dir)
 
 
@@ -283,7 +302,15 @@ def test(model, test_loader, device):
             output = model(data)
             test_loss += F.nll_loss(output, target, size_average=False).item()  # sum up batch loss
             pred = output.max(1, keepdim=True)[1]  # get the index of the max log-probability
+#             print("---------------- Predicted output test ----------------- " )
+#             print(pred)
+#             print("----------------- Target output test -------------------- ")
+#             print(target)
             correct += pred.eq(target.view_as(pred)).sum().item()
+            print("------------------ Number of correct predictions ----------------- ")
+            print(correct)
+            print("Total number of predictions")
+            print(len(pred))
 
     test_loss /= len(test_loader.dataset)
     logger.info(
